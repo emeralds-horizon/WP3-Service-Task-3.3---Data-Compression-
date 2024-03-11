@@ -1,0 +1,15 @@
+apiVersion: traefik.containo.us/v1alpha1
+kind: IngressRoute
+metadata:
+  name: model-example-ingressroute
+spec:
+  entryPoints:
+  - websecure
+  routes:
+  - kind: Rule
+    match: Host(`model-example.models.kubeflow.emeralds.ari-aidata.eu`)
+    services:
+    - name: istio-ingressgateway
+      port: 80
+  tls:
+    certResolver: letsencrypt

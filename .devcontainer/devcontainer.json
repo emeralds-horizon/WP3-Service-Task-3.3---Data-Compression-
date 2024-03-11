@@ -1,0 +1,55 @@
+{
+	"name": "mlops-platform-kserve-template",
+	"context": "..",
+	"dockerFile": "../Dockerfile",
+	"workspaceMount": "source=${localWorkspaceFolder},target=/app,type=bind,consistency=delegated",
+	"workspaceFolder": "/app",
+	"mounts": [
+		"source=${localEnv:USERPROFILE}/.gitconfig,target=/etc/gitconfig,type=bind,consistency=delegated",
+		"source=${devcontainerId:name}-bashhistory,target=/commandhistory,type=volume"
+	],
+	"extensions": [
+		"ms-python.python",
+		"eamodio.gitlens",
+		"ms-python.vscode-pylance",
+		"ms-python.isort",
+		"ms-python.black-formatter",
+		"tamasfe.even-better-toml",
+		"foxundermoon.shell-format",
+		"GitHub.vscode-github-actions",
+		"mhutchie.git-graph"
+	],
+	"settings": {
+		"editor.rulers": [
+			120
+		],
+		"files.trimFinalNewlines": true,
+		"files.trimTrailingWhitespace": true,
+		"files.insertFinalNewline": true,
+		"isort.args": [
+			"--settings-path=/app/pyproject.toml"
+		],
+		"python.formatting.blackArgs": [
+			"--config=/app/pyproject.toml"
+		],
+		"editor.formatOnSave": true,
+		"[python]": {
+			"editor.defaultFormatter": "ms-python.black-formatter",
+			"editor.formatOnSave": true,
+			"editor.codeActionsOnSave": {
+				"source.organizeImports": true
+			}
+		}
+	},
+	"containerEnv": {
+		// 1. This variables will be available in the kubernetes cluster, you do not need to set them in the Dockerfile
+		// 2. Declare the needed variables
+		// 3. We MUST NOT set env variables in scripts
+		// 4. You can hardcode your variables here, but DO NOT push this file if you do that (Take a look at the 3 point)
+		"MINIO_ACCESS_KEY": "${localEnv:MINIO_ACCESS_KEY}",
+		"MINIO_SECRET_ACCESS_KEY": "${localEnv:MINIO_SECRET_ACCESS_KEY}",
+		"MINIO_API_URL": "${localEnv:MINIO_API_URL}",
+		"MINIO_BUCKET": "${localEnv:MINIO_BUCKET}",
+		"MODEL_PATH":"${localEnv:MODEL_PATH}"
+	}
+}

@@ -1,0 +1,34 @@
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  annotations:
+    sidecar.istio.io/inject: "false"
+  name: model-example
+  namespace: models
+spec:
+  gateways:
+  - knative-serving/knative-local-gateway
+  - kubeflow/kubeflow-gateway
+  hosts:
+  - model-example.models.svc.cluster.local
+  - model-example.models.kubeflow.emeralds.ari-aidata.eu
+  http:
+  - headers:
+      request:
+        set:
+          Host: model-example-predictor-default.models.svc.cluster.local
+    match:
+    - authority:
+        regex: ^model-example\.models(\.svc(\.cluster\.local)?)?(?::\d{1,5})?$
+      gateways:
+      - knative-serving/knative-local-gateway
+    - authority:
+        regex: ^model-example\.models\.kubeflow\.emeralds\.ari-aidata\.eu(?::\d{1,5})?$
+      gateways:
+      - kubeflow/kubeflow-gateway
+    route:
+    - destination:
+        host: knative-local-gateway.istio-system.svc.cluster.local
+        port:
+          number: 80
+      weight: 100

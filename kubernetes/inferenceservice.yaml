@@ -1,0 +1,38 @@
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  name: model-example
+spec:
+  predictor:
+    containers:
+      - name: kserve-container
+        image: ghcr.io/emeralds-horizon/model-example:latest
+        imagePullPolicy: Always
+        env:
+          - name: MINIO_ACCESS_KEY
+            valueFrom:
+              secretKeyRef:
+                name: model-secrets
+                key: MINIO_ACCESS_KEY
+          - name: MINIO_SECRET_ACCESS_KEY
+            valueFrom:
+              secretKeyRef:
+                name: model-secrets
+                key: MINIO_SECRET_ACCESS_KEY
+          - name: MINIO_API_URL
+            valueFrom:
+              secretKeyRef:
+                name: model-secrets
+                key: MINIO_API_URL
+          - name: MINIO_BUCKET
+            valueFrom:
+              secretKeyRef:
+                name: model-secrets
+                key: MINIO_BUCKET
+          - name: MODEL_PATH
+            valueFrom:
+              secretKeyRef:
+                name: model-secrets
+                key: MODEL_PATH
+    imagePullSecrets:
+        - name: github-container-registry
