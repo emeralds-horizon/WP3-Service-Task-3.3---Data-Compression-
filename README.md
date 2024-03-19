@@ -1,2 +1,8 @@
-# mlops-platform-kserve-template
-Template repository for model deployment in MLOps platform
+# Description
+This repository presents the initial version of the Data Fusion service, developed under 3.3 of Work Package 3 within the EMERALDS project, with a primary focus on estimating missing values. Graph Convolutional Neural Networks (GCNNs) emerge as pivotal tools for this task, excelling in capturing spatial correlations within graphs. The module integrates various GCNN methods, encompassing spatial pattern extractor layers employing spatial-based and spectral-based techniques, alongside temporal pattern extractor layers with and without attention mechanisms. These components collaborate synergistically to estimate missing values.
+
+# Inputs
+
+# Requirements
+
+# Authors
