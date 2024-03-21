@@ -7,13 +7,27 @@ This repository presents the initial version of the Data Fusion service, develop
 - Torch
 - Pandas
 
-# Sample data input/output structures 
+# Data input/output structures 
+Datasets containd two files:
+1. Structure of the transportation network:
+   Shape (Origin sensor ID, Destination sensor ID, Cost (optianal))
+   This file is in CSV format and contains the conneectivity of sensor collcetors in the network.
+2. Historical data:
+   Shape (temporal sequence length, number of sensors, features)
+   This file is in NDZ format and contains historical data of each data collector with probability of having missing values. Currently only "speed" feature is using for estimation task. 
 
-# Input/Output interfaces & interactions
+The output file is containing the historical data with estimated values for missings. 
+
+
 
 # Deployment
 
+
 # Usage - Executing program
+Set config files and then train the model.
+'''
+python train.py
+'''
 
 # Authors
 ULB
