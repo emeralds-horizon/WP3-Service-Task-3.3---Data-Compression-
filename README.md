@@ -25,9 +25,9 @@ The output file is containing the historical data with estimated values for miss
 
 # Usage - Executing program
 Set config files and then train the model.
-'''
+```
 python train.py
-'''
+```
 
 # Authors
 ULB
