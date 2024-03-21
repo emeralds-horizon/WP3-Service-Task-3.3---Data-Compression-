@@ -18,9 +18,6 @@ Datasets comprise two files:
 
 The output file contains the historical data supplemented with estimated values for missings. 
 
-# Deployment
-
-
 # Usage - Executing program
 Model parameters can be configured in the file config.py, while the model is trained through main.py.
 
