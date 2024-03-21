@@ -22,9 +22,10 @@ The output file contains the historical data supplemented with estimated values 
 
 
 # Usage - Executing program
-Set config files and then train the model.
+Model parameters can be configured in the file config.py, while the model is trained through main.py.
+
 ```
-python train.py
+python main.py
 ```
 
 # Authors
