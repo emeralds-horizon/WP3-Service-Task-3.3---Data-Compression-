@@ -8,17 +8,15 @@ This repository presents the initial version of the Data Fusion service, develop
 - Pandas
 
 # Data input/output structures 
-Datasets containd two files:
-1. Structure of the transportation network:
+Datasets comprise two files:
+1. Transportation Network Structure:
    Shape (Origin sensor ID, Destination sensor ID, Cost (optianal))
-   This file is in CSV format and contains the conneectivity of sensor collcetors in the network.
+   This CSV-formatted file delineates the connectivity of sensor collectors in the network.
 2. Historical data:
    Shape (temporal sequence length, number of sensors, features)
-   This file is in NDZ format and contains historical data of each data collector with probability of having missing values. Currently only "speed" feature is using for estimation task. 
+   This NDZ-formatted file captures historical data with probability of missing values, from each data collector. At present, only the "speed" feature is utilized for this task.
 
-The output file is containing the historical data with estimated values for missings. 
-
-
+The output file contains the historical data supplemented with estimated values for missings. 
 
 # Deployment
 
