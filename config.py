@@ -21,7 +21,7 @@ parser.add_argument('--lrate', type=float, default=0.001, help='learning rate')
 parser.add_argument('--weight_decay', type=float, default=0.0001, help='weight decay rate')
 
 parser.add_argument('--save', type=str, default=p.join('data', 'NDW','val'), help='save model')
-parser.add_argument('--save_outputs', type=str, default= p.join('data', 'NDW','output_values.xlsx'),
+parser.add_argument('--save_outputs', type=str, default= p.join('data', 'NDW', 'output', 'output_values.xlsx'),
                     help='save est error for each segment, test set')
 
 parser.add_argument('--dropout', type=float, default=0.3, help='dropout rate')
