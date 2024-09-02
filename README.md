@@ -3,9 +3,11 @@ This repository presents the initial version of the Data Fusion service, develop
 
 # Requirements
 - Python >= 3.7
-- NumPy
-- Torch
-- Pandas
+- numPy==1.21.6
+- scipy
+- torch
+- pandas
+- h5py
 
 # Data input/output structures 
 Datasets comprise two files:
