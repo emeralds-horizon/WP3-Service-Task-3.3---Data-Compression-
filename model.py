@@ -33,26 +33,34 @@ class TemporalAttentionLayer(nn.Module):
     def __init__(self):
         super(TemporalAttentionLayer, self).__init__()
 
-        self.U_1 = nn.Parameter(torch.Tensor())
-        self.U_2 = nn.Parameter(torch.Tensor())
-        self.U_3 = nn.Parameter(torch.Tensor())
-        self.b_e = nn.Parameter(torch.Tensor())
-        self.V_e = nn.Parameter(torch.Tensor())
+        self.U_1 = nn.Parameter(torch.Tensor())  # transform the input in the spatial dimension
+        self.U_2 = nn.Parameter(torch.Tensor())  # combine features across time steps
+        self.U_3 = nn.Parameter(torch.Tensor())  # aggregate the temporal features
+        self.b_e = nn.Parameter(torch.Tensor())  # bias
+        self.W_e = nn.Parameter(torch.Tensor())  # learnable weight matrix
 
         self.init_scale = 0.1
+        self.initialized = False
 
     def initialize_parameters(self, num_of_vertices, num_of_features, num_of_timesteps):
-        self.U_1.data = F.pad(self.init_scale * torch.randn(num_of_vertices).double(), (0, 0))
-        self.U_2.data = F.pad(self.init_scale * torch.randn(num_of_features, num_of_vertices).double(), (0, 0))
-        self.U_3.data = F.pad(self.init_scale * torch.randn(num_of_features).double(), (0, 0))
-        self.b_e.data = F.pad(self.init_scale * torch.randn(1, num_of_timesteps, num_of_timesteps).double(), (0, 0))
-        self.V_e.data = F.pad(self.init_scale * torch.randn(num_of_timesteps, num_of_timesteps).double(), (0, 0))
+        # self.U_1.data = F.pad(self.init_scale * torch.randn(num_of_vertices).double(), (0, 0))
+        # self.U_2.data = F.pad(self.init_scale * torch.randn(num_of_features, num_of_vertices).double(), (0, 0))
+        # self.U_3.data = F.pad(self.init_scale * torch.randn(num_of_features).double(), (0, 0))
+        # self.b_e.data = F.pad(self.init_scale * torch.randn(1, num_of_timesteps, num_of_timesteps).double(), (0, 0))
+        # self.V_e.data = F.pad(self.init_scale * torch.randn(num_of_timesteps, num_of_timesteps).double(), (0, 0))
+        # self.init_parameters()
+        self.U_1 = nn.Parameter(self.init_scale * torch.randn(num_of_vertices).double())
+        self.U_2 = nn.Parameter(self.init_scale * torch.randn(num_of_features,num_of_vertices).double())
+        self.U_3 = nn.Parameter(self.init_scale * torch.randn(num_of_features).double())
+        self.b_e = nn.Parameter(self.init_scale * torch.randn(1, num_of_timesteps, num_of_timesteps).double())
+        self.W_e = nn.Parameter(self.init_scale * torch.randn(num_of_timesteps, num_of_timesteps).double())
+        self.initialized = True
 
     def forward(self, x):
         """
         Parameters
         ----------
-        x: torch tensor, shape is (batch_size, N, V, T)
+        x: torch tensor, shape is (batch_size, V, F, T)
 
         Returns
         ----------
@@ -62,26 +70,37 @@ class TemporalAttentionLayer(nn.Module):
         _, num_of_vertices, num_of_features, num_of_timesteps = x.shape
 
         # Lazy initialization
-        if not hasattr(self, 'U_1') or not hasattr(self.U_1, 'data') or self.U_1.data.numel() == 0:
+        if not self.initialized:
             self.initialize_parameters(num_of_vertices, num_of_features, num_of_timesteps)
 
-        # compute temporal attention scores > shape: [Batch_size, Time, Vertices]
-        tmp1 = torch.matmul(x.permute(0, 3, 2, 1).double(), self.U_1.data.double()).double()
-        lhs = torch.matmul(tmp1, self.U_2.data.double())
-        # shape: [Batch_size, Vertices, Time]
-        rhs = torch.matmul(x.permute(0, 1, 3, 2).double(), self.U_3.data.double())
-        # shape: [Batch_size, Time, Time]
-        product = torch.bmm(lhs, rhs)
+        # (X^{(r-1)})^T U_1 U_2
+        X_T = x.permute(0, 3, 2, 1)  # shape: (batch_size, num_of_timesteps, num_of_features, num_of_vertices)
 
-        sigmoid_product = torch.sigmoid(product + self.b_e.data.double())
-        e = torch.matmul(self.V_e.data.double(), sigmoid_product.permute(1, 2, 0)).permute(2, 0, 1)
+        term1 = torch.matmul(X_T, self.U_1)  # shape: (batch_size, num_of_timesteps, num_of_features)
+        term1 = torch.matmul(term1, self.U_2)  # shape: (batch_size, num_of_timesteps, num_of_vertices)
+
+        # U_3 X^{(r-1)}
+        # shape: (batch_size, num_of_vertices, num_of_timesteps)
+        if len(self.U_3) != 1: 
+            # term2 = torch.matmul(self.U_3, x.permute(2, 0, 1, 3))
+            term2 = torch.einsum('i,ijkl->jkl', self.U_3, x.permute(2, 0, 1, 3))
+        else:
+            term2 = x.squeeze(2)
+
+        # combine the terms
+        product = torch.matmul(term1, term2)  # shape: (batch_size, num_of_timesteps, num_of_timesteps)
+
+        # compute attention scores
+        E = torch.sigmoid(product + self.b_e)  # shape: (batch_size, num_of_timesteps, num_of_timesteps)
+
+        # apply the final transformation V_e
+        E = torch.matmul(E, self.W_e)  # shape: (batch_size, num_of_timesteps, num_of_timesteps)
 
         # normalization
-        e = e - torch.max(e, dim=1, keepdim=True)[0]
-        exp_e = torch.exp(e)
-        e_normalized = exp_e / torch.sum(exp_e, dim=1, keepdim=True)
+        # apply softmax to get attention weights
+        E_normalized = F.softmax(E, dim=-1)  # shape: (batch_size, num_of_timesteps, num_of_timesteps)
 
-        return e_normalized  # shape: [Batch_size, Time, Time]
+        return E_normalized.float()  # shape: [Batch_size, Time, Time]
 
 
 class ChebConvWithSAt(nn.Module):
@@ -109,9 +128,12 @@ class ChebConvWithSAt(nn.Module):
         self.cheb_polynomials = cheb_polynomials
         self.Theta = nn.Parameter(torch.Tensor())
         self.init_scale = 0.1
+        self.initialized = False
 
     def initialize_parameters(self, num_of_features):
-        self.Theta.data = F.pad(self.init_scale * torch.randn(self.K, num_of_features, self.num_of_filters).double(), (0, 0))
+        self.Theta = nn.Parameter(self.init_scale * torch.randn(self.K, num_of_features, self.num_of_filters).double())
+
+        self.initialized = True
 
     def forward(self, x, spatial_attention):
         """
@@ -119,43 +141,44 @@ class ChebConvWithSAt(nn.Module):
 
         Parameters
         ----------
-        x: torch tensor, shape is (batch_size, N, V, T)
+        x: torch tensor, shape is (batch_size, num_of_timesteps, num_of_features, num_of_vertices)
 
         spatial_attention: torch tensor, shape is (batch_size, Vertices, Vertices)
                            spatial attention scores
 
         Returns
         ----------
-        mx.ndarray, shape is (batch_size, N, self.num_of_filters, T_{r-1})
+        mx.ndarray, shape is (batch_size, num_of_vertices, self.num_of_filters, T_{r-1})
 
         """
-        (batch_size, num_of_vertices, num_of_features, num_of_timesteps) = x.shape
+
+        batch_size, num_of_vertices, num_of_features, num_of_timesteps = x.shape
 
         # Lazy initialization
-        if not hasattr(self, 'Theta') or not hasattr(self.Theta, 'data') or self.Theta.data.numel() == 0:
-            self.initialize_parameters(num_of_features)
+        if not self.initialized:
+            self.initialize_parameters(num_of_features)  
 
         outputs = []
         for time_step in range(num_of_timesteps):
 
-            graph_signal = x[:, :, :, time_step]
+            graph_signal = x[:, :, :, time_step]  # shape: (batch_size, num_of_features, num_of_vertices)
 
-            # shape: [batch_size, V, F]
             output = torch.zeros((batch_size, num_of_vertices, self.num_of_filters), device=x.device)
 
             for k in range(self.K):
 
-                T_k = self.cheb_polynomials[k]  # shape: [V, V]
-                T_k_with_at = T_k * spatial_attention  # shape: [batch_size, V, V]
-                theta_k = self.Theta.data[k].clone()  # shape: [number_of_features, num_of_filters]
-                rhs = torch.bmm(T_k_with_at.permute(0, 2, 1).double(),
-                                graph_signal.double()) # shape: [batch_size, Vertices, Features]
+                T_k = self.cheb_polynomials[k]  # shape: (num_of_vertices, num_of_vertices)
+                T_k_with_at = T_k * spatial_attention  # shape: (batch_size, num_of_vertices, num_of_vertices)
+                theta_k = self.Theta.data[k].clone()  # shape: (num_of_features, num_of_filters)
 
-                output = output + torch.matmul(rhs.double(), theta_k.double())
+                # apply Chebyshev convolution
+                rhs = torch.bmm(T_k_with_at.permute(0, 2, 1), graph_signal)   # shape: (batch_size, num_of_vertices, num_of_features)
+                tmp = torch.matmul(rhs, theta_k.unsqueeze(0))  # shape: (batch_size, num_of_vertices, num_of_filters)
+                output = output + tmp  # shape: (batch_size, num_of_vertices, num_of_filters)
 
-            outputs.append(output.unsqueeze(-1))
+            outputs.append(output.unsqueeze(-1))  # shape: (batch_size, num_of_vertices, num_of_filters, 1)
 
-        return torch.relu(torch.cat(outputs, dim=-1))  # shape: [Batches, Vertices, Filters, Times]
+        return torch.relu(torch.cat(outputs, dim=-1))   # shape: (batch_size, num_of_vertices, num_of_filters, num_of_timesteps)
 
 
 class SpatialAttentionLayer(nn.Module):
@@ -165,25 +188,28 @@ class SpatialAttentionLayer(nn.Module):
     def __init__(self):
         super(SpatialAttentionLayer, self).__init__()
 
-        self.W_1 = nn.Parameter(torch.Tensor())
-        self.W_2 = nn.Parameter(torch.Tensor())
-        self.W_3 = nn.Parameter(torch.Tensor())
-        self.b_s = nn.Parameter(torch.Tensor())
-        self.V_s = nn.Parameter(torch.Tensor())
+        self.W_1 = nn.Parameter(torch.Tensor())  # transform the input in the time dimension
+        self.W_2 = nn.Parameter(torch.Tensor())  # combine features across vertices
+        self.W_3 = nn.Parameter(torch.Tensor())  # transform the transposed input tensor
+        self.b_s = nn.Parameter(torch.Tensor())  # bias
+        self.W_s = nn.Parameter(torch.Tensor())  # learnable weight matrix
         self.init_scale = 0.1
+        self.initialized = False
 
     def initialize_parameters(self, num_of_vertices, num_of_features, num_of_timesteps):
-        self.W_1.data = F.pad(self.init_scale * torch.randn(num_of_timesteps).double(), (0, 0))
-        self.W_2.data = F.pad(self.init_scale * torch.randn(num_of_features, num_of_timesteps).double(), (0, 0))
-        self.W_3.data = F.pad(self.init_scale * torch.randn(num_of_features).double(), (0, 0))
-        self.b_s.data = F.pad(self.init_scale * torch.randn(1, num_of_vertices, num_of_vertices).double(), (0, 0))
-        self.V_s.data = F.pad(self.init_scale * torch.randn(num_of_vertices, num_of_vertices).double(), (0, 0))
+        self.W_1 = nn.Parameter(self.init_scale * torch.randn(num_of_timesteps).double())
+        self.W_2 = nn.Parameter(self.init_scale * torch.randn(num_of_features, num_of_timesteps).double())
+        self.W_3 = nn.Parameter(self.init_scale * torch.randn(num_of_features).double())
+        self.b_s = nn.Parameter(self.init_scale * torch.randn(1, num_of_vertices, num_of_vertices).double())
+        self.W_s = nn.Parameter(self.init_scale * torch.randn(num_of_vertices, num_of_vertices).double())
+
+        self.initialized = True
 
     def forward(self, x):
         """
         Parameters
         ----------
-        x: torch tensor, shape is (batch_size, N, V, T)
+        x: torch tensor, shape is (batch_size, V, F, T)
 
         Returns
         ----------
@@ -194,24 +220,37 @@ class SpatialAttentionLayer(nn.Module):
         _, num_of_vertices, num_of_features, num_of_timesteps = x.shape
 
         # Lazy initialization
-        if not hasattr(self, 'W_1') or not hasattr(self.W_1, 'data') or self.W_1.data.numel() == 0:
+        if not self.initialized:
             self.initialize_parameters(num_of_vertices, num_of_features, num_of_timesteps)
 
         # compute spatial attention scores
-        lhs = torch.matmul(torch.matmul(x, self.W_1.data.double()), self.W_2.data.double())  # shape: [batch_size, V, T]
-        rhs = torch.matmul(x.permute(0, 3, 1, 2).double(), self.W_3.data.double())  # shape: [batch_size, T, V]
-        product = torch.bmm(lhs, rhs)  # shape: [batch_size, V, V]
 
-        # S computation
-        sigmoid_s = torch.sigmoid(product + self.b_s.data.double())
-        s = torch.matmul(self.V_s.data.double(), sigmoid_s.permute(1, 2, 0)).permute(2, 0, 1)
+        # (X W_1) W_2
+        # shape: (batch_size, num_of_vertices, num_of_features)
+        term1 = torch.matmul(x, self.W_1)
+        term1 = torch.matmul(term1, self.W_2)
 
-        # normalization
-        s = s - torch.max(s, dim=1, keepdim=True)[0]
-        exp_s = torch.exp(s)
-        s_normalized = exp_s / torch.sum(exp_s, dim=1, keepdim=True)
+        # W_3 X^T
+        # shape: (batch_size, num_of_timesteps, num_of_vertices)
+        if len(self.W_3) != 1:  
+            # term2 = torch.matmul(self.W_3, x.permute(2, 0, 3, 1))
+            term2 = torch.einsum('i,ijkl->jkl', self.W_3, x.permute(2, 0, 3, 1))
+        else:
+            term2 = x.permute(0, 3, 2, 1).squeeze(2)
 
-        return s_normalized
+        # combine the terms
+        product = torch.matmul(term1, term2)  # shape: (batch_size, num_of_vertices, num_of_vertices)
+
+        # compute attention scores
+        S = torch.sigmoid(product + self.b_s)  # shape: (batch_size, num_of_vertices, num_of_vertices)
+
+        # apply the final transformation V_s
+        S = torch.matmul(S, self.W_s)  # shape: (batch_size, num_of_vertices, num_of_vertices)
+
+        # apply softmax to get normalized attention scores
+        S_normalized = F.softmax(S, dim=-1)  # shape: (batch_size, num_of_vertices, num_of_vertices)
+
+        return S_normalized.float()  # shape: [batch_size, num_of_vertices, num_of_vertices]
 
 
 class GCNBlock(nn.Module):
@@ -219,7 +258,7 @@ class GCNBlock(nn.Module):
     Each submodule contains one or more GCN block,
     based on its backbone in model_config
     """
-    def __init__(self, backbone):
+    def __init__(self, backbone, sub_net_name):
         """
         Parameters
         ----------
@@ -229,6 +268,7 @@ class GCNBlock(nn.Module):
                         "num_of_time_filters",
                         "time_conv_strides",
                         "cheb_polynomials"
+        sub_net_name: str, one of "week", "day", "hour"
         """
 
         super(GCNBlock, self).__init__()
@@ -236,6 +276,7 @@ class GCNBlock(nn.Module):
         K = backbone['K']
         num_of_chev_filters = backbone['num_of_chev_filters']
         num_of_time_filters = backbone['num_of_time_filters']
+        num_of_input_channels = backbone['num_of_input_channels']
         time_conv_strides = backbone['time_conv_strides']
         cheb_polynomials = backbone["cheb_polynomials"]
 
@@ -250,28 +291,29 @@ class GCNBlock(nn.Module):
             out_channels=num_of_time_filters,
             kernel_size=(1, 3),
             padding=(0, 1),
-            stride=(1, 1))
-        self.residual_conv1 = nn.Conv2d(  # once 3 and once 64?
-            in_channels=3,  # ###################
+            stride=(1, 1))  # strides=(1, time_conv_strides))
+        self.residual_conv = nn.Conv2d(
+            in_channels=num_of_input_channels,
             out_channels=num_of_time_filters,
             kernel_size=(1, 1),
-            stride=(1, 1))
+            stride=(1, 1))  # strides=(1, time_conv_strides))
 
-        self.residual_conv2 = nn.Conv2d(
-            in_channels=64,  # ###################
-            out_channels=num_of_time_filters,
-            kernel_size=(1, 1),
-            stride=(1, 1))
-
-        # self.ln = nn.LayerNorm(axis=2)  ???? from MXnet in this line, change it to the next line
         self.in_channels = 64
-        # do this based on sub_net name ??????
-        self.ln_w = nn.LayerNorm(normalized_shape=torch.Size([args.batch_size, args.num_of_vertices, self.in_channels,
-                                                              args.num_of_weeks]), elementwise_affine=True)
-        self.ln_d = nn.LayerNorm(normalized_shape=torch.Size([args.batch_size, args.num_of_vertices, self.in_channels,
-                                                              args.num_of_days]), elementwise_affine=True)
-        self.ln_h = nn.LayerNorm(normalized_shape=torch.Size([args.batch_size, args.num_of_vertices, self.in_channels,
-                                                              args.num_of_hours]), elementwise_affine=True)
+
+        if sub_net_name == "week":
+            self.ln = nn.LayerNorm(
+                normalized_shape=[args.batch_size, args.num_of_vertices, self.in_channels, args.num_of_weeks+1],
+                elementwise_affine=True)
+        elif sub_net_name == "day":
+            self.ln = nn.LayerNorm(
+                normalized_shape=[args.batch_size, args.num_of_vertices, self.in_channels, args.num_of_days+1],
+                elementwise_affine=True)
+        elif sub_net_name == "hour":
+            self.ln = nn.LayerNorm(
+                normalized_shape=[args.batch_size, args.num_of_vertices, self.in_channels, args.num_of_hours+1],
+                elementwise_affine=True)
+        else:
+            raise ValueError("Invalid sub_net_name. Must be one of ['week', 'day', 'hour']")
 
     def forward(self, x):
         """
@@ -279,7 +321,7 @@ class GCNBlock(nn.Module):
         ----------
         x: torch tensor, batch_size, num_of_vertices, num_of_features, num_of_timesteps
 
-        x: torch tensor, shape is (batch_size, N, C_{r-1}, T_{r-1}) ????
+        x: torch tensor, shape is (batch_size, N, C_{r-1}, T_{r-1}) 
 
         Returns
         ----------
@@ -289,143 +331,128 @@ class GCNBlock(nn.Module):
 
         (batch_size, num_of_vertices, num_of_features, num_of_timesteps) = x.shape
 
-        temporal_at = self.TAt(x)  # shape: [batch_size, T, T]
-        # shape: [batch_size, V, Features, T]
-        x_tat = torch.bmm(x.view(batch_size, -1, num_of_timesteps).double(), temporal_at.double()).\
-            view(batch_size, num_of_vertices, num_of_features, num_of_timesteps)
+        # temporal attention scores. shape: [batch_size, T, T]
+        temporal_at = self.TAt(x)
+
+        # apply attention scores to input. shape: [batch_size, V, T]
+        x_tat = torch.bmm(x.reshape(batch_size, -1, num_of_timesteps).float(), temporal_at.float()).double()
+        x_tat = x_tat.reshape(batch_size, num_of_vertices, num_of_features, num_of_timesteps)
 
         # cheb gcn with spatial attention
         spatial_at = self.SAt(x_tat)
         spatial_gcn = self.cheb_conv_SAt(x, spatial_at)
 
         # convolution along the time axis
-        time_conv_output = self.time_conv(spatial_gcn.permute(0, 2, 1, 3).float()).\
-            permute((0, 2, 1, 3))
+        # shape: (batch_size, num_of_vertices, num_of_time_filters, num_of_timesteps)
+        time_conv_output = self.time_conv(spatial_gcn.permute(0, 2, 1, 3).float()).permute((0, 2, 1, 3))
 
-        # residual:  # set it auto, based on the number of ST blocks
-        if num_of_features == 3:
-            x_residual = self.residual_conv1(x.permute(0, 2, 1, 3).float()).permute(0, 2, 1, 3)
-        elif num_of_features == self.in_channels:
-            x_residual = self.residual_conv2(x.permute(0, 2, 1, 3).float()).permute(0, 2, 1, 3)
-        else:
-            print('Error in residual')
-            exit()
+        # x_residual -> shape: (batch_size, num_of_vertices, num_of_time_filters, num_of_timesteps)
+        x_residual = self.residual_conv(x.permute(0, 2, 1, 3).float()).permute(0, 2, 1, 3)
 
-        # relu:
-        if num_of_timesteps == args.num_of_weeks:
-            rsl = self.ln_w(torch.relu(x_residual + time_conv_output))
-        elif num_of_timesteps == args.num_of_days:
-            rsl = self.ln_d(torch.relu(x_residual + time_conv_output))
-        elif num_of_timesteps == args.num_of_hours:
-            rsl = self.ln_h(torch.relu(x_residual + time_conv_output))
-        else:
-            print('Error in normalization layer')
-            exit()
+        # rsl -> shape: (batch_size, num_of_vertices, num_of_time_filters, num_of_timesteps)
+        rsl = self.ln(torch.relu(x_residual + time_conv_output))
 
-        return rsl
+        return rsl.double()
 
 
 class GCNSubmodule(nn.Module):
     """
-        a module in GCN: 1. week, 2.day, 3. week
+        a submodule of GCN: 1. week, 2.day, 3. hour
     """
 
-    def __init__(self, backbones):
+    def __init__(self, backbones, sub_net_name):
         """
             Parameters
             ----------
             backbones: list(dict), list of backbones for the current submodule
 
         """
-
         super(GCNSubmodule, self).__init__()
 
-        # For each backbone, create an instance of the GCNBlock class
+        # For each backbone of current submodule, create an instance of the GCNBlock class
         self.blocks = nn.Sequential()
-        for backbone in backbones:
-            self.blocks.add_module('astgcn_block', GCNBlock(backbone))
+        for idx, backbone in enumerate(backbones):
+            self.blocks.add_module(f'tgcn_block_{idx}', GCNBlock(backbone, sub_net_name))
         self.W = nn.Parameter(torch.Tensor())
-        # final fully connected layer
-        self.final_conv_w = nn.Conv2d(in_channels=args.num_of_weeks,
-                                      out_channels=1,
-                                      kernel_size=(1, backbones[-1]['num_of_time_filters']))
-        self.final_conv_d = nn.Conv2d(in_channels=args.num_of_days,
-                                      out_channels=1,
-                                      kernel_size=(1, backbones[-1]['num_of_time_filters']))
-        self.final_conv_h = nn.Conv2d(in_channels=args.num_of_hours,
-                                      out_channels=1,
-                                      kernel_size=(1, backbones[-1]['num_of_time_filters']))
 
-    def initialize_parameters(self, num_of_vertices, num_for_prediction):
-        self.W.data = F.relu(torch.randn(num_of_vertices, num_for_prediction).double(), (0, 0))
+        # final fully connected layer
+        if sub_net_name == "week":
+            self.final_conv = nn.Conv2d(in_channels=args.num_of_weeks+1,
+                                         out_channels=1,
+                                         kernel_size=(1, backbones[-1]['num_of_time_filters']))
+        elif sub_net_name == "day":
+            self.final_conv = nn.Conv2d(in_channels=args.num_of_days+1,
+                                          out_channels=1,
+                                          kernel_size=(1, backbones[-1]['num_of_time_filters']))
+        elif sub_net_name == "hour":
+            self.final_conv = nn.Conv2d(in_channels=args.num_of_hours+1,
+                                          out_channels=1,
+                                          kernel_size=(1, backbones[-1]['num_of_time_filters']))
+        else:
+            raise ValueError("Invalid sub_net_name. Must be one of ['week', 'day', 'hour']")
+
+        self.initialized = False
+
+    def initialize_parameters(self, num_of_vertices):
+        self.W = nn.Parameter(torch.randn(num_of_vertices))
+        # self.W.data = nn.Parameter(torch.randn(num_of_vertices).double(), (0, 0))
+        self.initialized = True
 
     def forward(self, x):
         """
             Parameters
             ----------
-            x: torch.Tensor, shape is (batch_size, num_of_vertices, num_of_features, num_of_timesteps)
+            x: torch.Tensor, shape is (batch_size, num_of_vertices, num_of_timesteps)
 
             Returns
             ----------
-            torch.ndarray, shape is (batch_size, num_of_vertices)????
+            torch.ndarray, shape is (batch_size, num_of_vertices)
         """
+        x = x.unsqueeze(2)  # adding features: to be useful for both blocks
+        x = self.blocks(x).float()  # shape: (batch_size, num_of_vertices, num_of_time_filters, num_of_timesteps)
 
-        x = self.blocks(x)
+        # final convolution + Relu  -> # shape: (batch_size, num_of_vertices)
+        module_output = torch.relu(self.final_conv(x.permute(0, 3, 1, 2))[:, -1, :, -1])
 
-        # hard code!!!!!!!!!!!!!!!!!!
-        # instead of checking timesteps, check sub_name, since we could have same timesteps
-        # final convolution + Relu
+        _, num_of_vertices = module_output.shape
 
-        timestep = x.shape[3]
-        if timestep == args.num_of_weeks:  # week
-            module_output = torch.relu(self.final_conv_w(x.permute(0, 3, 1, 2))[:, :, :, -1].permute(0, 2, 1))
+        if not self.initialized:
+            self.initialize_parameters(num_of_vertices)
 
-        elif timestep == args.num_of_days:  # day
-            module_output = torch.relu(self.final_conv_d(x.permute(0, 3, 1, 2))[:, :, :, -1].permute(0, 2, 1))
-
-        elif timestep == args.num_of_hours:  # hour
-            module_output = torch.relu(self.final_conv_h(x.permute(0, 3, 1, 2))[:, :, :, -1].permute(0, 2, 1))
-
-
-        _, num_of_vertices, num_for_prediction = module_output.shape
-
-        # Lazy initialization
-        if not hasattr(self, 'W') or not hasattr(self.W, 'data') or self.W.data.numel() == 0:
-            _, num_of_vertices, num_for_prediction = module_output.shape
-            self.initialize_parameters(num_of_vertices, num_for_prediction)
-
-        return module_output * self.W.data
+        return module_output * self.W.data  # shape: (batch_size, num_of_vertices)
 
 
 class GCN(nn.Module):
     """
-    ASTGCN, 3 sub-modules, for hour, day, week respectively
+    ASTGCN, which including 3 sub-modules, for week, day and hour respectively
     """
 
-    def __init__(self, sub_net_name, all_backbones):
+    def __init__(self, sub_net_names, all_backbones):
         """
         Parameters
         ----------
+        sub_net_names: list[list], 3 string names: week, day, hour
         all_backbones: list[list], 3 backbones for "week", "day", "hour" submodules
-        sub_net_name: list[list], 3 string names: week, day, hour
         """
 
         super(GCN, self).__init__()
+        self.sub_net_names = sub_net_names
         if len(all_backbones) <= 0:
             raise ValueError("The length of all_backbones must be greater than 0")
 
-        self.submodules = nn.ModuleList()
+        # self.submodules = nn.ModuleList()
+        self.submodules = nn.ModuleDict()
 
         for i in range(len(all_backbones)):
-            self.submodules.append(GCNSubmodule(all_backbones[i]))
-            self.add_module(sub_net_name[i], self.submodules[-1])
+            submodule = GCNSubmodule(all_backbones[i], sub_net_names[i])
+            self.submodules[sub_net_names[i]] = submodule
 
     def forward(self, data):
         """
         Parameters
         ----------
         data: list[torch.ndarray], including week, day, recent
-            each section shape is (batch_size, num_of_vertices, num_of_features, num_of_timesteps)
+            each section shape is (batch_size, num_of_vertices, num_of_timesteps)
         """
 
         if len(data) != len(self.submodules):
@@ -439,69 +466,105 @@ class GCN(nn.Module):
         if len(batch_size_set) != 1:
             raise ValueError("Input values must have same batch size!")
 
-        submodule_outputs = [self.submodules[idx](data[idx]) for idx in range(len(self.submodules))]
+        submodule_outputs = [self.submodules[self.sub_net_names[idx]](data[idx])
+                             for idx in range(len(self.submodules))]
 
         return torch.sum(torch.stack(submodule_outputs), dim=0)
 
 
 class Optimizer:
-    def __init__(self, sub_net_name, all_backbones):
+    def __init__(self, sub_net_names, all_backbones):
         """
         sub_net_name: list[list], 3 string names: week, day, hour
         all_backbones: list[list], 3 backbones for "week", "day", "hour" submodules
         device: str, cpu or gpu
         """
-
-        self.model = GCN(sub_net_name, all_backbones)
-        self.model.to(args.device)
-        # self.initialization = Initialization()
+        self.device = args.device
+        self.model = GCN(sub_net_names, all_backbones)
+        self.model.to(self.device)
         self.optimizer = optim.Adam(self.model.parameters(), lr=args.lrate, weight_decay=args.weight_decay)
-        # self.loss = util.masked_mae  # less sensitive to outliers
         self.loss = nn.MSELoss()
         self.clip = 5
 
-    def train(self, data, real):
+        # # model summary
+        # print(self.model)
+        # # detailed modules
+        # for name, module in self.model.named_modules():
+        #     print(f"Module name: {name}, Module: {module}")
+        #     print('***************************************')
+
+    def train(self, data, current, real, data_mask, mask):
         """
         :param data: list[torch.Tensor], including: [train_week, Train_day, Train_recent]
+        :param current: torch.Tensor, including current time real values  and artificial missing values
         :param real: torch.Tensor, including current time real values
-        :return: ???
+        :param data_mask: list[torch.Tensor], including: [train_week_mask, Train_day_mask, Train_recent_mask] :
+            including 0 and 1
+        :param mask: torch.Tensor, shape: num_of_vertices. The mask indicating which values in the current data are
+            observed (1), which are missing (0) or artificially missing (0.5)
+
+        :return: errors
         """
 
         self.model.train()  # sets the model in training mode
         self.optimizer.zero_grad()  # initializes the gradients
-        # maybe using initialization wrote in the first lines of this page ... ???
-
-        logdir = '/logs'  # Replace with your desired path
-        logdir = tempfile.mkdtemp()
-        # Initialize SummaryWriter
-        # sw = SummaryWriter(logdir=logdir, flush_secs=5)
 
         # training:
-        output = self.model(data)
+        # generator
+        # concatenate current data to the historical data along the time dimension
+        current = current.unsqueeze(-1)
+        data = [torch.cat([d, current], dim=2) for d in data]
+        output = self.model(data)  # shape: (batch_size, num_of_vertices)
 
-        # real: torch.ndarray, shape is (batch_size, num_of_vertices)  -> including the predicted value
-        # ??? put a if here, and do this line just when we have 1 time window for prediction
-        t_real = real.unsqueeze(2)
+        # discriminator
+        output = output.float()
+        real = real.float()
 
-        loss = self.loss(output, t_real)
+        # loss calculation
+        edited_mask = (mask == 0.5) | (mask == 1)  # shape: (batch_size, num_of_vertices)
+
+        loss = self.loss(output, real)
+        loss = loss * edited_mask  # apply mask to loss to include observed values
+        loss = loss.sum() / edited_mask.sum()  
         loss.backward()  # computes the gradients of the loss using back-propagation
 
         # updating parameters:
-        if self.clip is not None:  # gradient clipping
+        if self.clip is not None:
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.clip)
-        self.optimizer.step()  # updates the model parameters
+        self.optimizer.step()
 
-        mape = metrics.masked_mape_np(output, t_real, 0.0).item()
-        rmse = metrics.mean_squared_error(output, t_real).item()
+        # error calculation
+        mape = metrics.masked_mape_np(output, real, edited_mask).item()
+        rmse = metrics.mean_squared_error(output, real, edited_mask).item()
 
         return [loss.item(), mape, rmse]
 
-    def eval(self, data, real):
+
+    def eval(self, data, current, real, data_mask, mask):
+        """
+        Evaluate the model using the given data.
+
+        :param data: list[torch.Tensor], including: [val_week, val_day, val_recent]
+        :param current: torch.Tensor, including current time real values
+        :param real: torch.Tensor, including current time real values
+        :param data_mask: list[torch.Tensor], including: [val_week_mask, val_day_mask, val_recent_mask]
+        :param mask: torch.Tensor, indicating observed (1), missing (0), and artificially missing (0.5)
+
+        :return: list of errors [loss, mape, rmse]
+        """
         self.model.eval()
-        output = self.model(data)
+        current = current.unsqueeze(-1)
+        data = [torch.cat([d, current], dim=2) for d in data]
+        output = self.model(data)  # shape: (batch_size, num_of_vertices)
 
-        t_real = real.unsqueeze(2)
+        output = output.float()
+        real = real.float()
 
-        loss = self.loss(output, t_real)
+        # loss calculation
+        edited_mask = (mask == 0.5) | (mask == 1)  # shape: (batch_size, num_of_vertices)
+
+        loss = self.loss(output, real)
+        loss = loss * edited_mask  # apply mask to loss to include observed values
+        loss = loss.sum() / edited_mask.sum()  
 
         return loss.item()
