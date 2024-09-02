@@ -1,9 +1,26 @@
 import numpy as np
 import csv
+import h5py
 import torch
 from torch.utils.data import TensorDataset, DataLoader
 from scipy.sparse.linalg import eigs
+import pandas as pd
 
+# for avoiding test overflow warning
+# import random
+# seed = 1472378598
+# torch.manual_seed(seed)
+# np.random.seed(seed)
+# random.seed(seed)
+# for avoiding test overflow warning
+
+
+def initialize_missing_values(data):
+    # Create a mask for NaNs and negative values
+    mask = ~(np.isnan(data) | (data < 0))
+    # Replace NaNs and negative values with 0
+    data_filled = np.where(mask, data, 0.0)
+    return data_filled, mask
 
 def search_data(sequence_length, num_of_batches, label_start_idx, units, points_per_hour):
     '''
@@ -13,7 +30,7 @@ def search_data(sequence_length, num_of_batches, label_start_idx, units, points_
 
         num_of_batches: int, the number of batches will be used for training (ex. number of weeks)
 
-        label_start_idx: int, the index of predicting target
+        label_start_idx: int, the index of target
 
         units: int, week: 7 * 24, day: 24, recent(hour): 1
 
@@ -73,17 +90,17 @@ def normalization(train, val, test):
     return {'mean': mean, 'std': std}, train_norm, val_norm, test_norm
 
 
-def get_sample_indices(data, num_of_weeks, num_of_days, num_of_hours, label_start_idx, points_per_hour):
+def get_sample_indices(data, num_of_weeks, num_of_days, num_of_hours, target_idx, points_per_hour):
 
-    '''
+    """
     Parameters
     ----------
     data: np.ndarray
-                   shape is (sequence_length, num_of_vertices, num_of_features)
+                   shape is (num_of_vertices, sequence_length)
 
     num_of_weeks, num_of_days, num_of_hours: int
 
-    label_start_idx: int, the index of predicting target
+    target_idx: int, the index of target (e.g. current time)
 
     points_per_hour: int, default 12, number of points per hour
 
@@ -103,69 +120,144 @@ def get_sample_indices(data, num_of_weeks, num_of_days, num_of_hours, label_star
 
     target: np.ndarray
             shape is (num_of_vertices, num_of_features)
-    '''
+    """
 
-    temporal_len = data.shape[0]
-
-    week_indices = search_data(temporal_len, num_of_weeks, label_start_idx, 7 * 24, points_per_hour)
+    temporal_len = data.shape[1]
+    week_indices = search_data(temporal_len, num_of_weeks, target_idx, 7 * 24, points_per_hour)
     if not week_indices:
         return None
 
-    day_indices = search_data(temporal_len, num_of_days, label_start_idx, 24, points_per_hour)
+    day_indices = search_data(temporal_len, num_of_days, target_idx, 24, points_per_hour)
     if not day_indices:
         return None
 
-    hour_indices = search_data(temporal_len, num_of_hours, label_start_idx, 1, points_per_hour)
+    hour_indices = search_data(temporal_len, num_of_hours, target_idx, 1, points_per_hour)
     if not hour_indices:
         return None
+
+    data = data.T  # size: timesteps * counters
 
     week_sample = np.array([data[i] for i in week_indices])  # [unit size][spatial size][feature size]
     day_sample = np.array([data[i] for i in day_indices])  # [unit size][spatial size][feature size]
     hour_sample = np.array([data[i] for i in hour_indices])  # [unit size][spatial size][feature size]
+    target = data[target_idx]
 
-    target = data[label_start_idx]
-
-    return week_sample, day_sample, hour_sample, target
+    return week_sample.T, day_sample.T, hour_sample.T, target, week_indices, day_indices, hour_indices, target_idx
 
 
-def read_dataset(filename, num_of_weeks, num_of_days, num_of_hours, points_per_hour=12):
+def arti_missing_generator(sample_data, mask, arti_missing_ratio):
+    """
+    Generate a new sample and mask with artificially missing values.
+
+    Parameters
+    ----------
+    sample_data : input sample with shape of number_of_vertices
+    mask : the mask indicating observed (True) and missing (False) values.
+    arti_missing_ratio : int - The percentage of observed values to mark as artificially missing.
+
+    Returns
+    -------
+    new_sample : new sample with artificial missing values.
+    new_mask : a new mask with values 0, 0.5, and 1.
+        0 for originally missing values.
+        0.5 for the selected artificial missing values.
+        1 for the remaining observed values.
+    """
+
+    num_observed = mask.astype(float).sum()  # number of observed values
+    observed_indices = np.where(mask == True)[0]  # indices of observed values
+
+    arti_missing_fraction = int(num_observed * (arti_missing_ratio / 100.0))
+
+    # randomly select indices to be marked as artificially missing
+    arti_missing_indices = np.random.choice(
+        observed_indices,
+        size=arti_missing_fraction,
+        replace=False
+    )
+
+    new_mask = mask.astype(float).flatten()
+    new_mask[arti_missing_indices] = 0.5
+
+    new_sample = sample_data.copy()
+    new_sample.flatten()[arti_missing_indices] = 0  # set artificial missing values to zero
+
+    return new_sample, new_mask
+
+
+
+def read_dataset(filename, num_of_weeks, num_of_days, num_of_hours, data_per_hour, arti_missing_ratio):
+    """
+    arti_missing_ratio: int, The percentage of the observed values in each sample which take as artificial
+     missing values
+    """
 
     # read data:
-    data = np.load(filename)['data']  # [temporal][spatial][features]
+    roads_names = []
+    average_speeds = []
+    with h5py.File(filename, 'r') as f:
+        for road in f['average_speed']:
+            roads_names.append(road)
+            average_speeds.append(f['average_speed'][road][:])
+
+        roads_names = np.array(roads_names)
+        average_speeds = np.array(average_speeds)  # size: nodes * timesteps
+        timestamps = list(f['timestamps'][:])
+        timestamps = [pd.to_datetime(ts, unit='s').strftime('%Y-%m-%d %H:%M:%S') for ts in np.concatenate(timestamps)]
+
+        # if average_speeds.shape[0] != len(timestamps):
+        #     average_speeds = average_speeds.T # size: timesteps * nodes
+
+    # initializing misssing values
+    average_speeds, mask = initialize_missing_values(average_speeds)
 
     # generate samples:
     all_samples = []
-    for idx in range(data.shape[0]):
-        sample = get_sample_indices(data, num_of_weeks, num_of_days, num_of_hours, idx, points_per_hour)
+
+    for idx in range(len(timestamps)): #time
+        sample = get_sample_indices(average_speeds, num_of_weeks, num_of_days, num_of_hours, idx, data_per_hour)
         if not sample:
             continue
 
-        week_sample, day_sample, hour_sample, target = sample
+        week_sample, day_sample, hour_sample, current, week_indices, day_indices, hour_indices, current_idx = sample
+
+        # artificial missing values generation:
+        current_rt, mask_arti = arti_missing_generator(current, mask[:, current_idx], arti_missing_ratio)
+
+        # mask of historical data
+        week_mask = mask[:, week_indices].astype(float)
+        day_mask = mask[:, day_indices].astype(float)
+        hour_mask = mask[:, hour_indices].astype(float)
 
         all_samples.append((
-            np.expand_dims(week_sample, axis=0).transpose((0, 2, 3, 1)),
-            np.expand_dims(day_sample, axis=0).transpose((0, 2, 3, 1)),
-            np.expand_dims(hour_sample, axis=0).transpose((0, 2, 3, 1)),
-            np.expand_dims(target, axis=0).transpose((0, 1, 2))[:, :, 0]
+            week_sample,  # shape: (number_of_vertices, num_of_weeks)
+            day_sample,  # shape: (number_of_vertices, num_of_days)
+            hour_sample,   # shape: (number_of_vertices, num_of_hours)
+            current_rt,  # shape: (number_of_vertices) including artificial missing values
+            current,  # shape: (number_of_vertices)
+            week_mask,  # shape: (number_of_vertices, num_of_weeks)
+            day_mask,  # shape: (number_of_vertices, num_of_days)
+            hour_mask,   # shape: (number_of_vertices, num_of_hours)
+            mask_arti  # shape: number_of_vertices  - filled with True and False
         ))
 
     split_line1 = int(len(all_samples) * 0.6)  # 60% of the length of all_samples
     split_line2 = int(len(all_samples) * 0.8)  # 80% of the length of all_samples
 
-    training_set = [np.concatenate(i, axis=0) for i in zip(*all_samples[:split_line1])]  # 60%
-    validation_set = [np.concatenate(i, axis=0) for i in zip(*all_samples[split_line1: split_line2])]  # 20%
-    testing_set = [np.concatenate(i, axis=0) for i in zip(*all_samples[split_line2:])]  # 20%
+    training_set = all_samples[:split_line1]  # 60%
+    validation_set = all_samples[split_line1: split_line2]  # 20%
+    testing_set = all_samples[split_line2:]  # 20%
 
-    train_week, train_day, train_hour, train_target = training_set
-    val_week, val_day, val_hour, val_target = validation_set
-    test_week, test_day, test_hour, test_target = testing_set  # testing_set : [dataset][samples][road]
+    train_week, train_day, train_hour, train_current, train_real, train_week_mask, train_day_mask, train_hour_mask, train_mask = map(np.array, zip(*training_set))
+    val_week, val_day, val_hour, val_current, val_real, val_week_mask, val_day_mask, val_hour_mask, val_mask = map(np.array, zip(*validation_set))
+    test_week, test_day, test_hour, test_current, test_real, test_week_mask, test_day_mask, test_hour_mask, test_mask = map(np.array, zip(*testing_set))
 
-    print('training data: week: {}, day: {}, recent: {}, target: {}'.format(
-        train_week.shape, train_day.shape, train_hour.shape, train_target.shape))
-    print('validation data: week: {}, day: {}, recent: {}, target: {}'.format(
-        val_week.shape, val_day.shape, val_hour.shape, val_target.shape))
-    print('testing data: week: {}, day: {}, recent: {}, target: {}'.format(
-        test_week.shape, test_day.shape, test_hour.shape, test_target.shape))
+    print('training data: week: {}, day: {}, recent: {}, current: {}, real:{}, mask: {}'.format(
+        train_week.shape, train_day.shape, train_hour.shape, train_current.shape, train_real.shape, train_mask.shape))
+    print('validation data: week: {}, day: {}, recent: {}, current: {}, real:{}, mask: {}'.format(
+        val_week.shape, val_day.shape, val_hour.shape, val_current.shape, val_real.shape, val_mask.shape))
+    print('testing data: week: {}, day: {}, recent: {}, current: {}, real:{}, mask: {}'.format(
+        test_week.shape, test_day.shape, test_hour.shape, test_current.shape, test_real.shape, test_mask.shape))
 
     (week_stats, train_week_norm, val_week_norm, test_week_norm) = normalization(train_week, val_week, test_week)
     (day_stats, train_day_norm, val_day_norm, test_day_norm) = normalization(train_day, val_day, test_day)
@@ -176,19 +268,34 @@ def read_dataset(filename, num_of_weeks, num_of_days, num_of_hours, points_per_h
             'week': train_week_norm,
             'day': train_day_norm,
             'recent': train_recent_norm,
-            'target': train_target,
+            'current': train_current,
+            'real': train_real,
+            'week_mask': train_week_mask,
+            'day_mask': train_day_mask,
+            'hour_mask': train_hour_mask,
+            'mask': train_mask
         },
         'val': {
             'week': val_week_norm,
             'day': val_day_norm,
             'recent': val_recent_norm,
-            'target': val_target
+            'current': val_current,
+            'real': val_real,
+            'week_mask': val_week_mask,
+            'day_mask': val_day_mask,
+            'hour_mask': val_hour_mask,
+            'mask': val_mask
         },
         'test': {
             'week': test_week_norm,
             'day': test_day_norm,
             'recent': test_recent_norm,
-            'target': test_target
+            'current': test_current,
+            'real': test_real,
+            'week_mask': test_week_mask,
+            'day_mask': test_day_mask,
+            'hour_mask': test_hour_mask,
+            'mask': test_mask
         },
         'stats': {
             'week': week_stats,
@@ -197,33 +304,7 @@ def read_dataset(filename, num_of_weeks, num_of_days, num_of_hours, points_per_h
         }
     }
 
-    # data = {
-    #     'train': {
-    #         'week': train_week,
-    #         'day': train_day,
-    #         'recent': train_hour,
-    #         'target': train_target,
-    #     },
-    #     'val': {
-    #         'week': val_week,
-    #         'day': val_day,
-    #         'recent': val_hour,
-    #         'target': val_target
-    #     },
-    #     'test': {
-    #         'week': test_week,
-    #         'day': test_day,
-    #         'recent': test_hour,
-    #         'target': test_target
-    #     },
-    #     'stats': {
-    #         'week': week_stats,
-    #         'day': day_stats,
-    #         'recent': recent_stats
-    #     }
-    # }
-
-    return data
+    return data, roads_names
 
 
 def data_loader_creator(device, dataset_name, data, batch_size, shuffle):
@@ -248,20 +329,25 @@ def data_loader_creator(device, dataset_name, data, batch_size, shuffle):
     week = torch.tensor(data[dataset_name]['week'], device=device)
     day = torch.tensor(data[dataset_name]['day'], device=device)
     recent = torch.tensor(data[dataset_name]['recent'], device=device)
-    target = torch.tensor(data[dataset_name]['target'], device=device)
+    current = torch.tensor(data[dataset_name]['current'], device=device)
+    real = torch.tensor(data[dataset_name]['real'], device=device)
+    week_mask = torch.tensor(data[dataset_name]['week_mask'], device=device)
+    day_mask = torch.tensor(data[dataset_name]['day_mask'], device=device)
+    hour_mask = torch.tensor(data[dataset_name]['hour_mask'], device=device)
+    mask = torch.tensor(data[dataset_name]['mask'], device=device)
 
     # Create a TensorDataset from the tensors
-    dataset = TensorDataset(week, day, recent, target)
+    dataset = TensorDataset(week, day, recent, current, real, week_mask, day_mask, hour_mask, mask)
 
     # Create a DataLoader for the training dataset
     return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
 
 
-def adjacency_matrix(filename, num_of_vertices):
+def adjacency_matrix(filename, num_of_vertices, roads_names):
     '''
         Parameters
         ----------
-        filename: str, path of the csv file contains edges information
+        filename: str, path of the xlsx file contains edges information
 
         num_of_vertices: int, the number of vertices
 
@@ -271,16 +357,16 @@ def adjacency_matrix(filename, num_of_vertices):
 
     '''
 
-    with open(filename, 'r') as f:
-        reader = csv.reader(f)
-        f.__next__()  # pass header
-        edges = [(int(i[0]), int(i[1])) for i in reader]
+    df = pd.read_excel(filename, engine='openpyxl')
+    edges = [(row[0], row[1]) for row in df.itertuples(index=False)]
+
 
     adj = np.zeros((int(num_of_vertices), int(num_of_vertices)), dtype=np.float32)
 
-    for i, j in edges:
+    for origin, destination in edges:
+        i = np.argwhere(roads_names == origin)[0][0]
+        j = np.argwhere(roads_names == destination)[0][0]
         adj[i, j] = 1
-
     return adj
 
 
