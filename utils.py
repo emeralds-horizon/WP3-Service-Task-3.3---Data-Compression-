@@ -128,7 +128,3 @@ def weighted_kl(y_pred, y_true, weight, epsilon=1e-3):  # Kullback-Leibler (KL)
     avg_kl_div = weight_avg_kl_div / torch.sum(weight)
 
     return avg_kl_div
-
-
-
-
